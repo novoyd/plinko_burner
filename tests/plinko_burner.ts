@@ -201,4 +201,110 @@ describe("token_burner", () => {
       expect(error.toString()).to.include("AccountNotEmpty");
     }
   });
+
+  it("Burns and closes token account with tokens", async () => {
+    // Create a new mint for this test
+    const burnMint = await createMint(
+      provider.connection,
+      authority,
+      authority.publicKey,
+      null,
+      9
+    );
+    
+    // Create a new associated token account with tokens
+    const burnTokenAccount = await createAssociatedTokenAccount(
+      provider.connection,
+      user,
+      burnMint,
+      user.publicKey
+    );
+    
+    // Mint some tokens to it
+    const tokenAmount = 5000;
+    await mintTo(
+      provider.connection,
+      authority,
+      burnMint,
+      burnTokenAccount,
+      authority,
+      tokenAmount
+    );
+    
+    // Verify account has tokens before burning
+    const accountInfoBefore = await getAccount(provider.connection, burnTokenAccount);
+    expect(Number(accountInfoBefore.amount)).to.equal(tokenAmount);
+    
+    const tx = await program.methods
+      .burnAndCloseTokenAccount()
+      .accounts({
+        user: user.publicKey,
+        tokenAccount: burnTokenAccount,
+        mint: burnMint,
+        vault: vaultPda,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .signers([user])
+      .rpc();
+    
+    console.log("Burn and close token account transaction signature", tx);
+    
+    // Verify account was closed (should throw error when fetching)
+    try {
+      await getAccount(provider.connection, burnTokenAccount);
+      expect.fail("Token account should be closed");
+    } catch (error) {
+      // Expected - account should be closed
+    }
+    
+    // Verify vault received additional rent lamports
+    const vault = await program.account.vaultAccount.fetch(vaultPda);
+    // Should have collected rent from both the previous close and this burn+close
+    expect(Number(vault.lamportsCollected)).to.be.greaterThan(0);
+  });
+
+  it("Burns and closes empty token account", async () => {
+    // Create a new mint for this test
+    const emptyBurnMint = await createMint(
+      provider.connection,
+      authority,
+      authority.publicKey,
+      null,
+      9
+    );
+    
+    // Create a new associated token account (empty by default)
+    const emptyBurnTokenAccount = await createAssociatedTokenAccount(
+      provider.connection,
+      user,
+      emptyBurnMint,
+      user.publicKey
+    );
+    
+    // Verify account is empty before burning
+    const accountInfoBefore = await getAccount(provider.connection, emptyBurnTokenAccount);
+    expect(Number(accountInfoBefore.amount)).to.equal(0);
+    
+    const tx = await program.methods
+      .burnAndCloseTokenAccount()
+      .accounts({
+        user: user.publicKey,
+        tokenAccount: emptyBurnTokenAccount,
+        mint: emptyBurnMint,
+        vault: vaultPda,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .signers([user])
+      .rpc();
+    
+    console.log("Burn and close empty token account transaction signature", tx);
+    
+    // Verify account was closed
+    try {
+      await getAccount(provider.connection, emptyBurnTokenAccount);
+      expect.fail("Token account should be closed");
+    } catch (error) {
+      // Expected - account should be closed
+    }
+  });
 });

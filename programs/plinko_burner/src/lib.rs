@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{Token, TokenAccount, CloseAccount, close_account};
+use anchor_spl::token::{Token, TokenAccount, CloseAccount, close_account, Burn, burn};
 
 declare_id!("Cz4m7mpWX6nSUZxfKp2vjnHgYdF5rx9fmEwe9fWrabXd"); 
 
@@ -135,6 +135,75 @@ pub mod token_burner {
         msg!("Token account closed successfully, {} lamports sent to vault", rent_lamports);
         Ok(())
     }
+
+    /// Burns all tokens in an account and then closes it.
+    /// This is the main functionality for Stage 5 - burning standard SPL tokens.
+    /// * Burns all tokens in the account to reduce total supply
+    /// * Closes the empty account and sends rent to user's vault
+    /// * Designed with ALT support in mind for batch operations
+    pub fn burn_and_close_token_account(ctx: Context<BurnAndCloseTokenAccount>) -> Result<()> {
+        let token_account = &ctx.accounts.token_account;
+        let user = &ctx.accounts.user;
+        
+        // Security: Verify the token account owner matches the signer
+        require!(
+            token_account.owner == user.key(),
+            BurnerError::UnauthorizedAccount
+        );
+        
+        let token_amount = token_account.amount;
+        
+        msg!(
+            "Burning and closing token account - Mint: {}, Amount: {}, Owner: {}",
+            token_account.mint,
+            token_amount,
+            token_account.owner
+        );
+        
+        // Only burn if there are tokens to burn
+        if token_amount > 0 {
+            // Create CPI context for burning tokens
+            let burn_accounts = Burn {
+                mint: ctx.accounts.mint.to_account_info(),
+                from: ctx.accounts.token_account.to_account_info(),
+                authority: ctx.accounts.user.to_account_info(),
+            };
+            
+            let burn_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), burn_accounts);
+            
+            // Burn all tokens in the account
+            burn(burn_ctx, token_amount)?;
+            
+            msg!("Burned {} tokens from mint {}", token_amount, token_account.mint);
+        } else {
+            msg!("No tokens to burn, proceeding to close account");
+        }
+        
+        // Create CPI context for closing the token account
+        let close_accounts = CloseAccount {
+            account: ctx.accounts.token_account.to_account_info(),
+            destination: ctx.accounts.vault.to_account_info(),
+            authority: ctx.accounts.user.to_account_info(),
+        };
+        
+        let close_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), close_accounts);
+        
+        // Close the token account - rent goes to vault
+        close_account(close_ctx)?;
+        
+        // Update vault lamports collected (optional tracking)
+        let vault = &mut ctx.accounts.vault;
+        let rent = Rent::get()?;
+        let rent_lamports = rent.minimum_balance(TokenAccount::LEN);
+        vault.lamports_collected = vault.lamports_collected.saturating_add(rent_lamports);
+        
+        msg!(
+            "Burned {} tokens and closed account successfully, {} lamports sent to vault",
+            token_amount,
+            rent_lamports
+        );
+        Ok(())
+    }
 }
 
 // Account context for `initialize`
@@ -222,6 +291,35 @@ pub struct CloseTokenAccount<'info> {
     /// but Account<TokenAccount> provides better type safety for now
     #[account(mut)]
     pub token_account: Account<'info, TokenAccount>,
+    
+    /// User's vault PDA to receive the rent lamports
+    #[account(
+        mut,
+        seeds = [b"vault", user.key().as_ref()],
+        bump = vault.bump,
+        constraint = vault.owner == user.key() @ BurnerError::InvalidOwner
+    )]
+    pub vault: Account<'info, VaultAccount>,
+    
+    /// SPL Token program
+    pub token_program: Program<'info, Token>,
+}
+
+// Account context for `burn_and_close_token_account`
+// Designed to work efficiently with ALTs for batch operations
+#[derive(Accounts)]
+pub struct BurnAndCloseTokenAccount<'info> {
+    /// User who owns the token account
+    #[account(mut)]
+    pub user: Signer<'info>,
+    
+    /// SPL Token account to burn and close
+    #[account(mut)]
+    pub token_account: Account<'info, TokenAccount>,
+    
+    /// The mint of the token (required for burning)
+    #[account(mut)]
+    pub mint: Account<'info, anchor_spl::token::Mint>,
     
     /// User's vault PDA to receive the rent lamports
     #[account(
