@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{Token, TokenAccount};
+use anchor_spl::token::{Token, TokenAccount, CloseAccount, close_account};
 
-declare_id!("3v2dzYGyixvk3aWigSWi5nMMhHAfyQtNe4Rx21gjVyS5"); 
+declare_id!("Cz4m7mpWX6nSUZxfKp2vjnHgYdF5rx9fmEwe9fWrabXd"); 
 
 #[program]
 pub mod token_burner {
@@ -85,6 +85,56 @@ pub mod token_burner {
         
         Ok(())
     }
+
+    /// Closes an empty SPL token account and sends the rent to the user's vault.
+    /// Designed with ALT support in mind for batch operations in future stages.
+    /// * Verifies the token account is empty (0 balance)
+    /// * Closes the account using SPL Token program
+    /// * Rent lamports are sent to the user's vault PDA
+    pub fn close_token_account(ctx: Context<CloseTokenAccount>) -> Result<()> {
+        let token_account = &ctx.accounts.token_account;
+        let user = &ctx.accounts.user;
+        
+        // Security: Verify the token account owner matches the signer
+        require!(
+            token_account.owner == user.key(),
+            BurnerError::UnauthorizedAccount
+        );
+        
+        // Verify the token account is empty
+        require!(
+            token_account.amount == 0,
+            BurnerError::AccountNotEmpty
+        );
+        
+        msg!(
+            "Closing token account - Mint: {}, Owner: {}",
+            token_account.mint,
+            token_account.owner
+        );
+        
+        // Create CPI context for closing the token account
+        let cpi_accounts = CloseAccount {
+            account: ctx.accounts.token_account.to_account_info(),
+            destination: ctx.accounts.vault.to_account_info(),
+            authority: ctx.accounts.user.to_account_info(),
+        };
+        
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+        
+        // Close the token account - rent goes to vault
+        close_account(cpi_ctx)?;
+        
+        // Update vault lamports collected (optional tracking)
+        let vault = &mut ctx.accounts.vault;
+        let rent = Rent::get()?;
+        let rent_lamports = rent.minimum_balance(TokenAccount::LEN);
+        vault.lamports_collected = vault.lamports_collected.saturating_add(rent_lamports);
+        
+        msg!("Token account closed successfully, {} lamports sent to vault", rent_lamports);
+        Ok(())
+    }
 }
 
 // Account context for `initialize`
@@ -159,6 +209,33 @@ pub struct ValidateTokenAccount<'info> {
     pub token_account: Account<'info, TokenAccount>,
 }
 
+// Account context for `close_token_account`
+// Designed to work efficiently with ALTs for batch operations
+#[derive(Accounts)]
+pub struct CloseTokenAccount<'info> {
+    /// User who owns the token account
+    #[account(mut)]
+    pub user: Signer<'info>,
+    
+    /// SPL Token account to close (must be empty)
+    /// Using AccountInfo instead of Account<TokenAccount> would be more ALT-friendly
+    /// but Account<TokenAccount> provides better type safety for now
+    #[account(mut)]
+    pub token_account: Account<'info, TokenAccount>,
+    
+    /// User's vault PDA to receive the rent lamports
+    #[account(
+        mut,
+        seeds = [b"vault", user.key().as_ref()],
+        bump = vault.bump,
+        constraint = vault.owner == user.key() @ BurnerError::InvalidOwner
+    )]
+    pub vault: Account<'info, VaultAccount>,
+    
+    /// SPL Token program
+    pub token_program: Program<'info, Token>,
+}
+
 // Persistent data layout – one instance lives at the `state` PDA
 #[account]
 #[derive(InitSpace)]
@@ -184,4 +261,7 @@ pub enum BurnerError {
     
     #[msg("Token account not owned by user")] // thrown when token account owner != signer
     UnauthorizedAccount,
+    
+    #[msg("Token account is not empty")] // thrown when trying to close non-empty account
+    AccountNotEmpty,
 }
