@@ -1,4 +1,5 @@
-use anchor_lang::prelude::*;          // Pulls the full Anchor SDK into scope
+use anchor_lang::prelude::*;
+use anchor_spl::token::{Token, TokenAccount};
 
 declare_id!("3v2dzYGyixvk3aWigSWi5nMMhHAfyQtNe4Rx21gjVyS5"); 
 
@@ -52,6 +53,38 @@ pub mod token_burner {
         }
         Ok(())
     }
+
+    /// Validates a single token account for future burning/closing.
+    /// * Checks ownership matches the signer
+    /// * Verifies it's a real SPL token account  
+    /// * Logs basic account info
+    pub fn validate_token_account(ctx: Context<ValidateTokenAccount>) -> Result<()> {
+        let token_account = &ctx.accounts.token_account;
+        let user = &ctx.accounts.user;
+        
+        // Security: Verify the token account owner matches the signer
+        require!(
+            token_account.owner == user.key(),
+            BurnerError::UnauthorizedAccount
+        );
+        
+        // Log account details for debugging
+        msg!(
+            "Valid token account - Mint: {}, Balance: {}, Owner: {}",
+            token_account.mint,
+            token_account.amount,
+            token_account.owner
+        );
+        
+        // Check if account is empty (will be useful in later stages)
+        if token_account.amount == 0 {
+            msg!("Token account is empty and ready to close");
+        } else {
+            msg!("Token account has {} tokens", token_account.amount);
+        }
+        
+        Ok(())
+    }
 }
 
 // Account context for `initialize`
@@ -61,7 +94,7 @@ pub struct Initialize<'info> {
     #[account(mut)]
     pub authority: Signer<'info>,
     /// Program-Derived Account that stores state.
-    ///   • `init`       – create it if it doesn’t exist
+    ///   • `init`       – create it if it doesn't exist
     ///   • `payer`      – who funds rent
     ///   • `space`      – bytes to allocate (8-byte Anchor discriminator + our struct)
     ///   • `seeds`      – derive address from static seed `b"state"`
@@ -112,6 +145,20 @@ pub struct WithdrawVault<'info> {
     pub vault: Account<'info, VaultAccount>, // caller's vault PDA, must match owner
 }
 
+// Account context for `validate_token_account`
+#[derive(Accounts)]
+pub struct ValidateTokenAccount<'info> {
+    /// User who owns the token account
+    pub user: Signer<'info>,
+    
+    /// SPL Token account to validate
+    /// Anchor's Account<TokenAccount> automatically:
+    /// • Verifies it's owned by the Token Program
+    /// • Deserializes the account data
+    /// • Makes fields like mint, owner, amount available
+    pub token_account: Account<'info, TokenAccount>,
+}
+
 // Persistent data layout – one instance lives at the `state` PDA
 #[account]
 #[derive(InitSpace)]
@@ -134,4 +181,7 @@ pub struct VaultAccount {
 pub enum BurnerError {
     #[msg("Invalid owner")] // thrown when caller != vault.owner
     InvalidOwner,
+    
+    #[msg("Token account not owned by user")] // thrown when token account owner != signer
+    UnauthorizedAccount,
 }
